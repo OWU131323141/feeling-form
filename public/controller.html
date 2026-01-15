@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Controller</title>
+  <style>
+    body{ margin:0; padding:16px; font-family:system-ui, sans-serif; background:#111; color:#fff; }
+    .card{ background:#1b1b1b; border:1px solid #333; border-radius:12px; padding:14px; max-width:520px; }
+    input, button{
+      padding:10px 12px; border-radius:10px; border:1px solid #333;
+      background:#0f0f0f; color:#fff; font-size:16px;
+    }
+    button{ background:#222; cursor:pointer; }
+    .row{ display:flex; gap:10px; align-items:center; margin:10px 0; }
+    #log{ white-space:pre; background:#0b0b0b; border:1px solid #333; border-radius:10px; padding:10px; margin-top:10px; }
+    .small{ opacity:0.85; font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="row">
+      <div>Room:</div>
+      <input id="room" value="1234" />
+      <button id="connect">Connect</button>
+    </div>
+
+    <div class="row">
+      <button id="enable">Enable Sensor</button>
+      <div id="status" class="small">disconnected</div>
+    </div>
+
+    <div id="log">tiltX: 0.0
+tiltY: 0.0</div>
+
+    <div class="small">
+      ※ iPhoneは「Enable Sensor」を押さないと傾きが取れません。<br>
+      ※ PC側の room と同じ番号にしてください。
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const statusEl = $("status");
+    const logEl = $("log");
+
+    let ws;
+    let room = "1234";
+    let sensorEnabled = false;
+
+    function wsUrl() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      return `${proto}://${location.host}`;
+    }
+
+    function readRoomFromUrl(){
+      const params = new URLSearchParams(location.search);
+      const r = params.get("room");
+      if (r) $("room").value = r;
+    }
+
+    function connect() {
+      room = $("room").value.trim() || "1234";
+      if (ws && (ws.readyState === 0 || ws.readyState === 1)) ws.close();
+
+      ws = new WebSocket(wsUrl());
+
+      ws.onopen = () => {
+        statusEl.textContent = "connected (ws)";
+        ws.send(JSON.stringify({ type: "join", room, role: "phone" }));
+        ws.send(JSON.stringify({ type: "hello", room }));
+      };
+
+      ws.onclose = () => statusEl.textContent = "disconnected";
+      ws.onerror = () => statusEl.textContent = "error";
+    }
+
+    async function enableSensor() {
+      try {
+        if (typeof DeviceOrientationEvent !== "undefined" &&
+            typeof DeviceOrientationEvent.requestPermission === "function") {
+          const p = await DeviceOrientationEvent.requestPermission();
+          if (p !== "granted") {
+            statusEl.textContent = "permission denied";
+            return;
+          }
+        }
+
+        sensorEnabled = true;
+        statusEl.textContent = "sensor enabled";
+
+        window.addEventListener("deviceorientation", (e) => {
+          const x = e.gamma ?? 0;
+          const y = e.beta ?? 0;
+
+          logEl.textContent = `tiltX: ${x.toFixed(1)}\ntiltY: ${y.toFixed(1)}`;
+
+          if (ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: "tilt", room, x, y }));
+          }
+        }, true);
+
+      } catch (err) {
+        statusEl.textContent = "sensor error";
+        console.warn(err);
+      }
+    }
+
+    $("connect").addEventListener("click", connect);
+    $("enable").addEventListener("click", enableSensor);
+
+    readRoomFromUrl();
+    connect();
+  </script>
+</body>
+</html>

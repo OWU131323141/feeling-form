@@ -1,0 +1,403 @@
+import express from "express";
+import dotenv from "dotenv";
+import sharp from "sharp";
+import { WebSocketServer } from "ws";
+
+dotenv.config();
+
+const app = express();
+app.use(express.json({ limit: "1mb" }));
+app.use(express.static("public"));
+
+/** =========================
+ *  既存: LLM 感情解析
+ *  ========================= */
+app.post("/api/analyze", async (req, res) => {
+  try {
+    const { text } = req.body ?? {};
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "text is required" });
+    }
+
+    const endpoint = process.env.OPENAI_API_ENDPOINT;
+    const apiKey = process.env.OPENAI_API_KEY;
+
+    if (!endpoint) return res.status(500).json({ error: "OPENAI_API_ENDPOINT is not set" });
+    if (!apiKey) return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+
+    const payload = {
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            "あなたは感情解析APIです。ユーザー文章から感情を数値化し、指定のJSONのみを返してください。余計な文章は禁止です。"
+        },
+        {
+          role: "user",
+          content: `以下の文章から感情を解析し、JSONだけを返してください。
+
+出力JSON（必須）:
+{
+  "warmth": 0〜1,
+  "calm": 0〜1,
+  "energy": 0〜1,
+  "keywords": ["...","..."]
+}
+
+文章:
+"""${text}"""`
+        }
+      ],
+      temperature: 0.3
+    };
+
+    const r = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + apiKey
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await r.json().catch(() => ({}));
+
+    if (!r.ok) {
+      return res.status(r.status).json({
+        error: "LLM proxy request failed",
+        details: data
+      });
+    }
+
+    const content = data?.choices?.[0]?.message?.content ?? "";
+
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      return res.status(502).json({
+        error: "Model output was not valid JSON",
+        raw: content,
+        full: data
+      });
+    }
+
+    const clamp01 = (x) => Math.max(0, Math.min(1, Number(x)));
+    const safe = {
+      warmth: clamp01(parsed.warmth),
+      calm: clamp01(parsed.calm),
+      energy: clamp01(parsed.energy),
+      keywords: Array.isArray(parsed.keywords)
+        ? parsed.keywords.map(String).slice(0, 8)
+        : ["mood"]
+    };
+
+    return res.json(safe);
+  } catch (e) {
+    return res.status(500).json({ error: "server error", message: String(e) });
+  }
+});
+
+/** =========================
+ *  Pinterest 検索 → 画像からパレット抽出（提出では不安定なら未使用でもOK）
+ *  ========================= */
+app.post("/api/pinterest/palette", async (req, res) => {
+  try {
+    const token = getPinterestToken();
+    if (!token) {
+      return res.status(500).json({ error: "PINTEREST_ACCESS_TOKEN is not set" });
+    }
+
+    const { term, limit } = req.body ?? {};
+    if (!term || typeof term !== "string") {
+      return res.status(400).json({ error: "term is required" });
+    }
+
+    const n = Math.max(1, Math.min(10, Number(limit ?? 6))); // 1..10
+    const url =
+      "https://api.pinterest.com/v5/search/partner/pins" +
+      "?term=" + encodeURIComponent(term) +
+      "&limit=" + encodeURIComponent(String(n));
+
+    const r = await fetch(url, {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + token }
+    });
+
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return res.status(r.status).json({
+        error: "Pinterest API request failed",
+        details: data
+      });
+    }
+
+    const items = Array.isArray(data?.items) ? data.items : [];
+    const imageUrls = items
+      .map(pickImageUrlFromPin)
+      .filter(Boolean)
+      .slice(0, n);
+
+    const palettes = [];
+    for (const imgUrl of imageUrls) {
+      try {
+        const pr = await fetch(imgUrl, { method: "GET" });
+        if (!pr.ok) continue;
+        const buf = Buffer.from(await pr.arrayBuffer());
+
+        const small = await sharp(buf)
+          .resize({ width: 96, height: 96, fit: "inside" })
+          .removeAlpha()
+          .raw()
+          .toBuffer({ resolveWithObject: true });
+
+        const colors = quantizeColors(small.data, 5); // 5色
+        palettes.push(colors);
+      } catch {
+        // 画像取得/CORS/形式などで落ちても全体は返す
+      }
+    }
+
+    const merged = mergePalettes(palettes, 6); // 最大6色
+    return res.json({
+      term,
+      count: items.length,
+      sampledImages: palettes.length,
+      palette: merged
+    });
+  } catch (e) {
+    return res.status(500).json({ error: "server error", message: String(e) });
+  }
+});
+
+/** =========================
+ * Pinterest API (v5) proxy
+ * ========================= */
+const PINTEREST_API_BASE = "https://api.pinterest.com/v5";
+
+function getPinterestToken() {
+  const t = process.env.PINTEREST_ACCESS_TOKEN;
+  return t && String(t).trim().length ? String(t).trim() : null;
+}
+
+// 自分のPinterestアカウント情報（疎通確認に最適）
+app.get("/api/pinterest/me", async (req, res) => {
+  try {
+    const token = getPinterestToken();
+    if (!token) return res.status(500).json({ error: "PINTEREST_ACCESS_TOKEN is not set" });
+
+    const r = await fetch(`${PINTEREST_API_BASE}/user_account`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return res.status(r.status).json({ error: "Pinterest request failed", details: data });
+
+    return res.json({
+      username: data.username ?? null,
+      profile_image: data.profile_image ?? null,
+      account_type: data.account_type ?? null
+    });
+  } catch (e) {
+    return res.status(500).json({ error: "server error", message: String(e) });
+  }
+});
+
+// 自分が見れるボード一覧（401理由が見えるよう「raw返し」に統一）
+app.get("/api/pinterest/boards", async (req, res) => {
+  try {
+    const token = getPinterestToken();
+    if (!token) return res.status(500).json({ error: "PINTEREST_ACCESS_TOKEN is not set" });
+
+    const pageSize = Math.min(50, Math.max(1, Number(req.query.page_size ?? 25)));
+    const url = new URL(`${PINTEREST_API_BASE}/boards`);
+    url.searchParams.set("page_size", String(pageSize));
+
+    const r = await fetch(url.toString(), {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    const raw = await r.text();
+
+    if (!r.ok) {
+      return res.status(r.status).json({
+        error: "Pinterest request failed",
+        status: r.status,
+        body: raw
+      });
+    }
+
+    return res.type("application/json").send(raw);
+  } catch (e) {
+    return res.status(500).json({ error: "server error", message: String(e) });
+  }
+});
+
+app.get("/api/debug/env", (req, res) => {
+  const token = process.env.PINTEREST_ACCESS_TOKEN;
+  res.json({
+    hasPinterestToken: !!token && String(token).trim().length > 10,
+    tokenPrefix: token ? String(token).trim().slice(0, 8) : null
+  });
+});
+
+/** ---------- 画像URL抽出（壊れにくい探索） ---------- */
+function pickImageUrlFromPin(pin) {
+  if (!pin || typeof pin !== "object") return null;
+
+  const candidates = [
+    pin?.images?.original?.url,
+    pin?.images?.["1200x"]?.url,
+    pin?.images?.["600x"]?.url,
+    pin?.images?.["400x"]?.url,
+    pin?.media?.images?.original?.url,
+    pin?.media?.images?.["1200x"]?.url,
+    pin?.media?.images?.["600x"]?.url,
+    pin?.image?.url,
+    pin?.image_large_url,
+    pin?.image_medium_url,
+    pin?.image_small_url,
+    pin?.thumbnail?.url
+  ];
+
+  for (const c of candidates) {
+    if (typeof c === "string" && c.startsWith("http")) return c;
+  }
+
+  for (const v of Object.values(pin)) {
+    if (v && typeof v === "object") {
+      const url = v?.url;
+      if (typeof url === "string" && url.startsWith("http")) return url;
+    }
+  }
+  return null;
+}
+
+/** ---------- 色量子化（超簡易：代表色を数色に） ---------- */
+function quantizeColors(rgbRaw, k) {
+  const step = 12;
+  const bins = new Map();
+
+  for (let i = 0; i < rgbRaw.length; i += 3 * step) {
+    const r = rgbRaw[i] ?? 0;
+    const g = rgbRaw[i + 1] ?? 0;
+    const b = rgbRaw[i + 2] ?? 0;
+
+    const br = Math.round(r / 32) * 32;
+    const bg = Math.round(g / 32) * 32;
+    const bb = Math.round(b / 32) * 32;
+    const key = br + "," + bg + "," + bb;
+
+    bins.set(key, (bins.get(key) ?? 0) + 1);
+  }
+
+  return [...bins.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, k)
+    .map(([key]) => {
+      const [r, g, b] = key.split(",").map((x) => Number(x));
+      return rgbToHex(r, g, b);
+    });
+}
+
+function mergePalettes(palettes, maxColors) {
+  const counts = new Map();
+  for (const pal of palettes) {
+    for (const c of pal) counts.set(c, (counts.get(c) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, maxColors)
+    .map(([c]) => c);
+}
+
+function rgbToHex(r, g, b) {
+  const to2 = (x) => x.toString(16).padStart(2, "0");
+  return "#" + to2(clamp255(r)) + to2(clamp255(g)) + to2(clamp255(b));
+}
+function clamp255(x) {
+  return Math.max(0, Math.min(255, Number(x) || 0));
+}
+
+/** =========================
+ * WebSocket relay (phone -> pc)
+ * ========================= */
+function safeSend(ws, obj) {
+  if (!ws) return;
+  if (ws.readyState !== 1) return; // WebSocket.OPEN
+  ws.send(JSON.stringify(obj));
+}
+
+/** Cloud Shellは8080/8081が埋まりやすい */
+const PORT = process.env.PORT || 8081;
+
+// ★ listen結果を server に保持して WebSocket を同居させる
+const server = app.listen(PORT, () => {
+  console.log("Server running at http://localhost:" + PORT);
+});
+
+const wss = new WebSocketServer({ server });
+
+// room -> { viewer: ws|null, controller: ws|null }
+const rooms = new Map();
+
+wss.on("connection", (ws) => {
+  ws.on("message", (buf) => {
+    let msg;
+    try {
+      msg = JSON.parse(buf.toString());
+    } catch {
+      return;
+    }
+
+    const { type, room, role } = msg || {};
+    if (!room || typeof room !== "string") return;
+
+    if (type === "join") {
+      const entry = rooms.get(room) || { viewer: null, controller: null };
+
+      if (role === "viewer") entry.viewer = ws;
+      if (role === "controller") entry.controller = ws;
+
+      rooms.set(room, entry);
+
+      ws.__room = room;
+      ws.__role = role;
+
+      safeSend(ws, { type: "joined", room, role });
+      safeSend(entry.viewer, { type: "peer", connected: !!entry.controller });
+      safeSend(entry.controller, { type: "peer", connected: !!entry.viewer });
+      return;
+    }
+
+    if (type === "sensor") {
+      const entry = rooms.get(room);
+      if (!entry?.viewer) return;
+
+      safeSend(entry.viewer, {
+        type: "sensor",
+        tiltX: Number(msg.tiltX) || 0,
+        tiltY: Number(msg.tiltY) || 0,
+        alpha: Number(msg.alpha) || 0
+      });
+    }
+  });
+
+  ws.on("close", () => {
+    const room = ws.__room;
+    if (!room) return;
+
+    const entry = rooms.get(room);
+    if (!entry) return;
+
+    if (entry.viewer === ws) entry.viewer = null;
+    if (entry.controller === ws) entry.controller = null;
+
+    safeSend(entry.viewer, { type: "peer", connected: !!entry.controller });
+    safeSend(entry.controller, { type: "peer", connected: !!entry.viewer });
+
+    if (!entry.viewer && !entry.controller) rooms.delete(room);
+    else rooms.set(room, entry);
+  });
+});

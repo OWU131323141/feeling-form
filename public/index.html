@@ -7,21 +7,51 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- canvasはp5が生成（style.cssで最背面固定） -->
 
-  <div id="ui">
-    <div class="label">Feeling → Form</div>
-    <textarea id="input" placeholder="今の気分を書いてください"></textarea>
-    <button id="send">Generate</button>
-    <button id="permission">Enable Sensor</button>
-    <div id="status" class="status"></div>
-  </div>
+  <!-- 入力画面 -->
+  <section id="uiInput">
+    <h1>Feeling → Form</h1>
+    <p>いまの気分をひとこと（短くてOK）</p>
+
+    <textarea id="input" maxlength="280" placeholder="例：少し疲れたけど、明日が楽しみ。"></textarea>
+
+    <div class="row">
+      <div><span id="count">0</span>/280</div>
+      <div id="status"></div>
+    </div>
+
+    <div class="row">
+      <button id="send">Generate</button>
+      <button id="permission" type="button">Enable Sensor（この端末）</button>
+    </div>
+
+    <div class="small">
+      ※ スマホ連携するなら Controller Link を使う（Generate後に出る）<br>
+      ※ URLに ?room=1234 を付けると部屋番号固定できる
+    </div>
+  </section>
+
+  <!-- アート画面 -->
+  <section id="uiArt" style="display:none;">
+    <div class="top">
+      <button id="back">← Back</button>
+      <button id="copyRoomLink">Controller Link</button>
+      <span id="mini">live</span>
+    </div>
+
+    <div class="hud">
+      <div>Warmth: <span id="vWarmth">0.00</span></div>
+      <div>Calm: <span id="vCalm">0.00</span></div>
+      <div>Energy: <span id="vEnergy">0.00</span></div>
+      <div>keywords: <span id="keywords"></span></div>
+      <div class="small">傾き：window.tiltX / window.tiltY</div>
+    </div>
+  </section>
 
   <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
-
   <script src="llm.js"></script>
-  <script src="pinterest.js"></script>
   <script src="sketch.js"></script>
   <script src="main.js"></script>
-
 </body>
 </html>

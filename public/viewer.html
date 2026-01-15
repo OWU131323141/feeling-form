@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Viewer</title>
+  <style>
+    html, body { margin:0; padding:0; height:100%; background:#000; }
+    #panel{
+      position:fixed; left:12px; top:12px; z-index:10;
+      background:rgba(0,0,0,0.65); color:#fff; padding:10px 12px;
+      border-radius:10px; font-family:system-ui, sans-serif; font-size:14px;
+      display:flex; gap:8px; align-items:center;
+    }
+    #status { margin-left:8px; opacity:0.9; }
+    input{ width:90px; padding:6px 8px; border-radius:8px; border:1px solid #444; background:#111; color:#fff; }
+    button{ padding:6px 10px; border-radius:8px; border:1px solid #444; background:#222; color:#fff; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <div>Room:</div>
+    <input id="room" value="1234" />
+    <button id="connect">Connect</button>
+    <div id="status">disconnected</div>
+  </div>
+
+  <script>
+    // index.html に渡すチャネル（タブ間共有）
+    const bc = new BroadcastChannel("tilt-channel");
+
+    const $ = (id) => document.getElementById(id);
+    const statusEl = $("status");
+
+    let ws;
+    let gotTiltOnce = false;
+
+    function wsUrl() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      return `${proto}://${location.host}`;
+    }
+
+    function connect() {
+      const room = $("room").value.trim() || "1234";
+      if (ws && (ws.readyState === 0 || ws.readyState === 1)) ws.close();
+
+      ws = new WebSocket(wsUrl());
+
+      ws.onopen = () => {
+        statusEl.textContent = "connected (waiting phone...)";
+        ws.send(JSON.stringify({ type: "join", room, role: "viewer" }));
+      };
+
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+
+        if (msg.type === "tilt") {
+          // サーバの形式（tiltX/tiltY）とスマホ直送形式（x/y）の両対応
+          const x = Number(msg.tiltX ?? msg.x) || 0;
+          const y = Number(msg.tiltY ?? msg.y) || 0;
+
+          bc.postMessage({ tiltX: x, tiltY: y });
+
+          if (!gotTiltOnce) {
+            gotTiltOnce = true;
+            statusEl.textContent = "phone connected (tilt received)";
+          }
+        }
+      };
+
+      ws.onclose = () => { statusEl.textContent = "disconnected"; gotTiltOnce=false; };
+      ws.onerror = () => { statusEl.textContent = "error"; };
+    }
+
+    $("connect").addEventListener("click", connect);
+    connect();
+  </script>
+</body>
+</html>

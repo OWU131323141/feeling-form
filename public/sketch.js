@@ -1,128 +1,146 @@
+// Feeling → Form (stable)
+// ✅ noLoopしない / fadeしない / canvas消さない
+// ✅ UI切替で真っ黒事故にならない
+
 let visualData = {
-  warmth: 0.5,
-  calm: 0.5,
-  energy: 0.5,
-  avgHue: 200,
-  brightness: 0.5,
-  contrast: 0.5
+  motion: "drift",
+  hue: 210, sat: 40, bri: 80,
+  baseRadius: 140,
+  noiseScale: 0.8,
+  noiseAmp: 35,
+  rotSpeed: 0.004,
+  strokeW: 1.2,
+  breathSpeed: 0.9,
+  pulsePower: 2.0,
+  jitter: 2.0
 };
 
-let tiltX = 0;
-let tiltY = 0;
+let tiltX = 0, tiltY = 0;
 
-let life = 0;
-let fading = false;
-let generatedTime = 0;
-
-let memoryLayer;
-
-function setup() {
+function setup(){
+  pixelDensity(1);
+  frameRate(30);
+  setAttributes("antialias", false);
   createCanvas(windowWidth, windowHeight, WEBGL);
   colorMode(HSB, 360, 100, 100, 100);
-  noiseDetail(4, 0.5);
+  noiseDetail(3, 0.5);
 
-  memoryLayer = createGraphics(windowWidth, windowHeight, WEBGL);
-  memoryLayer.colorMode(HSB, 360, 100, 100, 100);
-  memoryLayer.saved = false;
+  window.__FEELING_FORM__ = {
+    getCanvas: () => document.querySelector("canvas"),
+    getState: () => ({ visualData, tiltX, tiltY })
+  };
 
-  life = 0;
-  generatedTime = millis();
+  window.addEventListener("FEELING_START", (ev) => {
+    const plan = ev?.detail?.plan || {};
+    applyPlan(plan);
+  });
 }
 
-function windowResized() {
-  resizeCanvas(windowWidth, windowHeight);
-  const old = memoryLayer;
-  memoryLayer = createGraphics(windowWidth, windowHeight, WEBGL);
-  memoryLayer.colorMode(HSB, 360, 100, 100, 100);
-  memoryLayer.push(); memoryLayer.clear(); memoryLayer.pop();
-  memoryLayer.saved = false;
-  void old;
+function windowResized(){ resizeCanvas(windowWidth, windowHeight); }
+
+function applyPlan(plan){
+  if (!plan || typeof plan !== "object") return;
+
+  const m = String(plan.motion || "").trim();
+  if (["breathing","tremble","pulse","drift"].includes(m)) visualData.motion = m;
+
+  const p = plan.params || {};
+  visualData.hue        = clamp(num(p.hue, visualData.hue), 0, 360);
+  visualData.sat        = clamp(num(p.sat, visualData.sat), 10, 95);
+  visualData.bri        = clamp(num(p.bri, visualData.bri), 10, 95);
+
+  visualData.baseRadius = clamp(num(p.baseRadius, visualData.baseRadius), 70, 240);
+  visualData.noiseScale = clamp(num(p.noiseScale, visualData.noiseScale), 0.2, 1.6);
+  visualData.noiseAmp   = clamp(num(p.noiseAmp, visualData.noiseAmp), 5, 110);
+
+  visualData.rotSpeed   = clamp(num(p.rotSpeed, visualData.rotSpeed), 0.0005, 0.016);
+  visualData.strokeW    = clamp(num(p.strokeW, visualData.strokeW), 0.6, 2.2);
+
+  visualData.breathSpeed= clamp(num(p.breathSpeed, visualData.breathSpeed), 0.2, 2.2);
+  visualData.pulsePower = clamp(num(p.pulsePower, visualData.pulsePower), 1.0, 4.0);
+  visualData.jitter     = clamp(num(p.jitter, visualData.jitter), 0, 12);
 }
 
-function draw() {
-  const bgA = map(life, 0, 1, 80, 20);
-  background(0, 0, 0, bgA);
+function draw(){
+  if (typeof window.tiltX === "number") tiltX = window.tiltX;
+  if (typeof window.tiltY === "number") tiltY = window.tiltY;
 
-  // 痕跡
-  push();
-  resetMatrix();
-  image(memoryLayer, -width / 2, -height / 2);
-  pop();
+  background(0,0,0,100);
 
-  if (life <= 0) {
-    drawEndHint();
-    return;
+  const rx = map(tiltY, -45, 45, -1.0, 1.0);
+  const ry = map(tiltX, -45, 45, -1.0, 1.0);
+  const rotBase = Number(visualData.rotSpeed || 0.004);
+
+  const motion = visualData.motion || "drift";
+  if (motion === "drift"){
+    rotateX(rx + frameCount * rotBase * 0.45);
+    rotateY(ry + frameCount * rotBase * 0.55);
+  } else if (motion === "breathing"){
+    rotateX(rx + frameCount * rotBase * 0.28);
+    rotateY(ry + frameCount * rotBase * 0.28);
+  } else if (motion === "pulse"){
+    rotateX(rx + frameCount * rotBase * 0.75);
+    rotateY(ry + frameCount * rotBase * 0.95);
+  } else { // tremble
+    rotateX(rx + frameCount * rotBase * 0.7 + sin(frameCount * 0.10) * 0.04);
+    rotateY(ry + frameCount * rotBase * 0.7 + cos(frameCount * 0.09) * 0.04);
   }
-
-  // 15秒で終焉へ
-  if (!fading && millis() - generatedTime > 15000) fading = true;
-  if (fading) life = max(0, life - 0.002);
-
-  // 傾きで視点
-  const rx = map(tiltY, -45, 45, -0.6, 0.6);
-  const ry = map(tiltX, -45, 45, -0.6, 0.6);
-  rotateX(rx + frameCount * 0.001);
-  rotateY(ry + frameCount * 0.002);
-
-  const baseRadius = map(visualData.energy, 0, 1, 90, 240) * life;
-  const noiseScale = map(visualData.calm, 0, 1, 0.25, 1.6);
-  const t = frameCount * 0.01;
-
-  const sat = map(visualData.warmth, 0, 1, 25, 80);
-  const bri = map(visualData.brightness, 0, 1, 55, 95);
 
   noFill();
-  stroke(visualData.avgHue, sat, bri, life * 80);
-  strokeWeight(1.2);
+  stroke(Number(visualData.hue), Number(visualData.sat), Number(visualData.bri), 85);
+  strokeWeight(Number(visualData.strokeW));
 
-  drawOrganicSphere(baseRadius, noiseScale, t);
+  const baseRadius0 = Number(visualData.baseRadius);
+  const noiseScale  = Number(visualData.noiseScale);
+  const noiseAmp0   = Number(visualData.noiseAmp);
+  const t = frameCount * 0.012;
 
-  // 残り香保存
-  if (life <= 0.02 && !memoryLayer.saved) saveMemoryLayer(t);
+  let radiusMod = 0;
+  if (motion === "breathing"){
+    const sp = Number(visualData.breathSpeed);
+    radiusMod = sin(frameCount * 0.018 * sp) * 18;
+  } else if (motion === "pulse"){
+    const pow = Number(visualData.pulsePower);
+    const s = (sin(frameCount * 0.06) + 1) / 2;
+    radiusMod = (Math.pow(s, pow) - 0.25) * 55;
+  } else if (motion === "tremble"){
+    const j = Number(visualData.jitter);
+    radiusMod = (noise(t * 7, 10) - 0.5) * 24 + sin(frameCount * 0.33) * j;
+  } else {
+    radiusMod = sin(frameCount * 0.008) * 14;
+  }
+
+  const tiltEffect = map(Math.abs(tiltX), 0, 45, 0, 90);
+  const r = (baseRadius0 + radiusMod + tiltEffect);
+
+  drawSphereStrip(r, noiseScale, noiseAmp0, t);
 }
 
-function drawEndHint() {
-  push();
-  resetMatrix();
-  fill(255, 35);
-  textAlign(CENTER, CENTER);
-  textSize(14);
-  text("Generate to feel again", 0, height / 2);
-  pop();
-}
+function drawSphereStrip(r, noiseScale, noiseAmp, t){
+  const detailLat = 20;
+  const detailLon = 22;
 
-function saveMemoryLayer(t) {
-  memoryLayer.saved = true;
-  memoryLayer.push();
-  memoryLayer.clear();
-  memoryLayer.rotateY(frameCount * 0.001);
-  memoryLayer.rotateX(frameCount * 0.001);
-  memoryLayer.noFill();
-  memoryLayer.stroke(visualData.avgHue, 40, 80, 15);
-  memoryLayer.strokeWeight(1);
-  drawOrganicSphere.call(memoryLayer, 130, 0.9, t);
-  memoryLayer.pop();
-}
-
-function drawOrganicSphere(r, noiseScale, t) {
-  const g = this || window;
-  const detail = 30;
-
-  for (let i = 0; i < detail; i++) {
-    const lat = map(i, 0, detail, -HALF_PI, HALF_PI);
-    g.beginShape();
-    for (let j = 0; j <= detail; j++) {
-      const lon = map(j, 0, detail, -PI, PI);
-      const nx = cos(lat) * cos(lon);
-      const ny = sin(lat);
-      const nz = cos(lat) * sin(lon);
-
-      const n = noise(nx * noiseScale + 10, ny * noiseScale + 10, nz * noiseScale + t);
-      const tiltEffect = map(abs(tiltX), 0, 45, 0, 40);
-
-      const radius = r + (n * 60 + tiltEffect) * life;
-      g.vertex(radius * nx, radius * ny, radius * nz);
+  for (let i=0; i<detailLat; i++){
+    const lat1 = map(i, 0, detailLat, -HALF_PI, HALF_PI);
+    const lat2 = map(i+1, 0, detailLat, -HALF_PI, HALF_PI);
+    beginShape(TRIANGLE_STRIP);
+    for (let j=0; j<=detailLon; j++){
+      const lon = map(j, 0, detailLon, -PI, PI);
+      vtx(r, lat1, lon, noiseScale, noiseAmp, t);
+      vtx(r, lat2, lon, noiseScale, noiseAmp, t);
     }
-    g.endShape();
+    endShape();
   }
 }
+
+function vtx(r, lat, lon, noiseScale, noiseAmp, t){
+  const nx = cos(lat) * cos(lon);
+  const ny = sin(lat);
+  const nz = cos(lat) * sin(lon);
+  const n = noise(nx * noiseScale + 10, ny * noiseScale + 10, nz * noiseScale + t);
+  const rr = r + (n - 0.5) * 2 * noiseAmp;
+  vertex(rr * nx, rr * ny, rr * nz);
+}
+
+function num(v,f){ const n=Number(v); return Number.isFinite(n)?n:f; }
+function clamp(x,a,b){ return Math.max(a, Math.min(b, x)); }
